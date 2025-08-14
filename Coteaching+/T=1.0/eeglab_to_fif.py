@@ -2,21 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 EEGLAB .set -> MNE .fif converter
+- 連續(raw) .set：輸出一個 .fif
+- 分段(epochs/trials) .set：每個 trial 另存一個檔案：{stem}_trial###-epo.fif
 
-Usage examples:
-  # 單檔轉換
-  python eeglab_to_fif.py "C:\data\subject01.set"
-
-  # 指定輸出資料夾、平均參考、嘗試套用標準電極座標
-  python eeglab_to_fif.py "C:\data\subject01.set" -o "C:\out" --ref avg --montage standard_1005
-
-  # 將整個資料夾內的 .set 皆轉換 (遞迴)
-  python eeglab_to_fif.py "C:\data\eeglab_projects" -o "C:\out" -r
-
-Notes:
-- 需先安裝: pip install mne numpy
-- .set 搭配的 .fdt 檔案需放在同一資料夾 (MNE 會自動讀取)
-- 事件(Event)會保存在 MNE 的 Annotations 中；若需要 STIM channel，可加 --stim 生成 "STI 014"
+用法：
+  python eeglab_to_fif.py "C:\\data\\subject01.set"
+  python eeglab_to_fif.py "C:\\data\\eeglab_projects" -o "C:\\out" -r --ref avg --montage auto
 """
 
 import argparse
@@ -28,122 +19,85 @@ import numpy as np
 import mne
 
 
-def _guess_and_set_montage(raw: mne.io.BaseRaw, montage: Optional[str]) -> None:
+def _guess_and_set_montage(info_owner, montage: Optional[str]) -> None:
     """
-    Auto / explicit montage handling.
-    - If montage is None: do nothing (沿用 EEGLAB 檔內之座標/不處理)
-    - If montage is 'auto': 若檔內沒有座標，嘗試 standard_1005；若 channel 名稱對不上會忽略
-    - If montage is explicit (e.g. 'standard_1020', 'standard_1005', 'biosemi64' ...): 強制嘗試套用
+    info_owner: 可以是 Raw 或 Epochs；兩者皆支援 .set_montage()
     """
     if montage is None:
         return
 
     if montage == "auto":
-        # 若已有 dig/monatge 就跳過
-        has_dig = raw.info.get("dig") is not None and len(raw.info["dig"]) > 0
+        has_dig = info_owner.info.get("dig") is not None and len(info_owner.info["dig"]) > 0
         if has_dig:
             return
         try:
             std = mne.channels.make_standard_montage("standard_1005")
-            raw.set_montage(std, match_case=False, on_missing="ignore", verbose="error")
+            info_owner.set_montage(std, match_case=False, on_missing="ignore", verbose="error")
             print("[info] Applied 'standard_1005' montage (auto).")
         except Exception as e:
             print(f"[warn] Auto montage failed to apply: {e}")
         return
 
-    # 明確指定 montage 名稱
     try:
         std = mne.channels.make_standard_montage(montage)
-        raw.set_montage(std, match_case=False, on_missing="ignore")
+        info_owner.set_montage(std, match_case=False, on_missing="ignore")
         print(f"[info] Applied montage: {montage}")
     except Exception as e:
         print(f"[warn] Failed to apply montage '{montage}': {e}")
 
 
-def _maybe_set_reference(raw: mne.io.BaseRaw, ref: Optional[str]) -> None:
-    """
-    參考電極設定：
-      - None: 不變更 (沿用 EEGLAB)
-      - 'avg' / 'average': 設定平均參考
-      - 其他字串: 視為單一或多個通道名稱 (以逗號分隔) 作為參考
-    """
+def _maybe_set_reference(info_owner, ref: Optional[str]) -> None:
     if ref is None:
         return
-
     if ref.lower() in {"avg", "average"}:
-        raw.set_eeg_reference("average", projection=False)
+        info_owner.set_eeg_reference("average", projection=False)
         print("[info] Set EEG reference to average.")
         return
-
-    # 多個通道用逗號切
     ref_chs = [ch.strip() for ch in ref.split(",") if ch.strip()]
     if not ref_chs:
         return
-    raw.set_eeg_reference(ref_channels=ref_chs, projection=False)
+    info_owner.set_eeg_reference(ref_channels=ref_chs, projection=False)
     print(f"[info] Set EEG reference to: {ref_chs}")
 
 
 def _add_stim_from_annotations(raw: mne.io.BaseRaw, event_id: Optional[Dict[str, int]] = None) -> None:
-    """
-    將 Annotations 轉成 STIM channel 'STI 014'（在事件發生樣本點寫入事件代碼）。
-    注意：同一時間若有多個事件，後者會覆蓋前者的代碼。
-    """
     if raw.annotations is None or len(raw.annotations) == 0:
         print("[info] No annotations found; skip STIM channel creation.")
         return
-
     events, _event_id = mne.events_from_annotations(raw, event_id=event_id, verbose=False)
     if events.size == 0:
         print("[info] No events parsed from annotations; skip STIM channel creation.")
         return
-
     n_times = raw.n_times
     sfreq = raw.info["sfreq"]
     first_samp = raw.first_samp
-
     stim_data = np.zeros((1, n_times), dtype=np.int16)
     for samp, _, code in events:
         idx = int(samp - first_samp)
         if 0 <= idx < n_times:
             stim_data[0, idx] = int(code)
-
     stim_info = mne.create_info(ch_names=["STI 014"], sfreq=sfreq, ch_types=["stim"])
     stim_raw = mne.io.RawArray(stim_data, stim_info, verbose=False)
     raw.add_channels([stim_raw], force_update_info=True)
     print("[info] Added STIM channel 'STI 014' from annotations.")
 
 
-def convert_one(
-    set_path: Path,
-    out_dir: Path,
-    montage: Optional[str] = None,
-    ref: Optional[str] = None,
-    make_stim: bool = False,
-    overwrite: bool = False,
-) -> Optional[Path]:
-    """
-    轉換單一 .set 檔到 .fif。成功則回傳輸出路徑。
-    """
+def convert_raw(set_path: Path, out_dir: Path, montage: Optional[str], ref: Optional[str],
+                make_stim: bool, overwrite: bool) -> Optional[Path]:
     try:
         raw = mne.io.read_raw_eeglab(str(set_path), preload=True, verbose="warning")
-    except FileNotFoundError as e:
-        print(f"[error] {e}")
-        return None
     except Exception as e:
-        print(f"[error] Fail to read {set_path}: {e}")
+        print(f"[error] read_raw_eeglab failed: {e}")
         return None
 
-    # 座標與參考設定
     _guess_and_set_montage(raw, montage)
     _maybe_set_reference(raw, ref)
 
-    # 可選：從註解建立 STIM 通道
     if make_stim:
         _add_stim_from_annotations(raw)
 
     out_dir.mkdir(parents=True, exist_ok=True)
     out_path = out_dir / (set_path.stem + ".fif")
-
     try:
         raw.save(str(out_path), overwrite=overwrite)
         print(f"[ok] Saved: {out_path}")
@@ -153,8 +107,62 @@ def convert_one(
         return None
 
 
-def iter_set_files(root: Path, recursive: bool = False) -> Sequence[Path]:
-    """列舉資料夾內所有 .set 檔案"""
+def convert_epochs_split(set_path: Path, out_dir: Path, montage: Optional[str], ref: Optional[str],
+                         overwrite: bool) -> int:
+    """
+    將 epochs .set 讀入並拆成單一 trial 檔案：{stem}_trial###-epo.fif
+    回傳成功數量
+    """
+    try:
+        epochs = mne.io.read_epochs_eeglab(str(set_path), verbose="warning", montage=None, event_id=None)
+    except Exception as e:
+        print(f"[error] read_epochs_eeglab failed: {e}")
+        return 0
+
+    # 套用 montage / 參考
+    _guess_and_set_montage(epochs, montage)
+    _maybe_set_reference(epochs, ref)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n = len(epochs)
+    width = max(3, len(str(n)))
+    ok = 0
+    for i in range(n):
+        # 只保留第 i 個 trial
+        ep_i = epochs[i]  # slicing 回傳新的 Epochs，僅含一個 epoch
+        out_path = out_dir / (f"{set_path.stem}_trial{str(i+1).zfill(width)}-epo.fif")
+        try:
+            ep_i.save(str(out_path), overwrite=overwrite)
+            ok += 1
+            print(f"[ok] Saved: {out_path}")
+        except Exception as e:
+            print(f"[error] Fail to save {out_path}: {e}")
+    return ok
+
+
+def convert_one(set_path: Path, out_dir: Path, montage: Optional[str], ref: Optional[str],
+                make_stim: bool, overwrite: bool) -> Optional[Path]:
+    """
+    嘗試當作 raw 讀取；若失敗且為 epochs .set，改以 epochs 讀入並逐 trial 輸出。
+    若為 epochs，回傳 None（因為輸出多個檔案），但視為成功（印出總成功數）。
+    """
+    # 先試 raw
+    try:
+        return convert_raw(set_path, out_dir, montage, ref, make_stim, overwrite)
+    except Exception:
+        pass
+
+    # 若 raw 讀取失敗，嘗試 epochs 模式（拆檔）
+    print("[info] Fall back to epochs mode (split per trial).")
+    cnt = convert_epochs_split(set_path, out_dir, montage, ref, overwrite)
+    if cnt > 0:
+        # 回傳 None 但標示成功
+        return None
+    else:
+        return None
+
+
+def iter_set_files(root: Path, recursive: bool = False):
     if root.is_file():
         return [root]
     if recursive:
@@ -165,7 +173,7 @@ def iter_set_files(root: Path, recursive: bool = False) -> Sequence[Path]:
 
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="Convert EEGLAB .set to MNE .fif (保留 annotations / 可選 STIM channel)"
+        description="Convert EEGLAB .set to MNE .fif 。若為 epochs 檔，會自動拆成每 trial 一個 -epo.fif"
     )
     p.add_argument("input", help="輸入 .set 檔或資料夾路徑")
     p.add_argument("-o", "--out", default=None, help="輸出資料夾 (預設為輸入所在資料夾)")
@@ -174,7 +182,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
                    help="電極座標：None(不處理) / auto(自動嘗試 standard_1005) / 或明確名稱如 standard_1020, standard_1005")
     p.add_argument("--ref", default=None,
                    help="參考：None(不變更) / avg(平均參考) / 指定通道，例如 'CZ' 或 'M1,M2'")
-    p.add_argument("--stim", action="store_true", help="由 annotations 生成 'STI 014' STIM channel")
+    p.add_argument("--stim", action="store_true", help="(僅 raw 有效) 由 annotations 生成 'STI 014' STIM channel")
     p.add_argument("--overwrite", action="store_true", help="若輸出已存在則覆蓋")
     return p.parse_args(argv)
 
@@ -183,11 +191,7 @@ def main(argv: Sequence[str]) -> int:
     args = parse_args(argv)
     in_path = Path(args.input).expanduser().resolve()
 
-    # 決定輸出資料夾
-    if args.out:
-        out_dir = Path(args.out).expanduser().resolve()
-    else:
-        out_dir = (in_path.parent if in_path.is_file() else in_path).resolve()
+    out_dir = Path(args.out).expanduser().resolve() if args.out else ((in_path.parent if in_path.is_file() else in_path).resolve())
 
     set_files = iter_set_files(in_path, recursive=args.recursive)
     if not set_files:
@@ -197,18 +201,23 @@ def main(argv: Sequence[str]) -> int:
     print(f"[info] Found {len(set_files)} file(s).")
     ok, fail = 0, 0
     for f in set_files:
-        res = convert_one(
-            set_path=f,
-            out_dir=out_dir,
-            montage=args.montage,
-            ref=args.ref,
-            make_stim=args.stim,
-            overwrite=args.overwrite,
-        )
-        if res is None:
-            fail += 1
-        else:
-            ok += 1
+        # 先嘗試 raw；若為 epochs 將自動 fallback 並逐 trial 輸出
+        try:
+            res = mne.io.read_raw_eeglab(str(f), preload=True, verbose="error")
+            # 能讀成 raw，交給 raw 轉檔
+            res = convert_raw(f, out_dir, args.montage, args.ref, args.stim, args.overwrite)
+            if res is None:
+                fail += 1
+            else:
+                ok += 1
+        except Exception as e:
+            # raw 不行，走 epochs 模式
+            print(f"[info] {f.name} looks like epochs (.set with trials). Split per trial...")
+            cnt = convert_epochs_split(f, out_dir, args.montage, args.ref, args.overwrite)
+            if cnt > 0:
+                ok += 1  # 視為該檔成功處理
+            else:
+                fail += 1
 
     print(f"[done] success: {ok}, failed: {fail}")
     return 0 if fail == 0 else 1
