@@ -1,5 +1,4 @@
-# REAL
-REAL: Robust EEG Analysis and Labeling for Chronic Migraine Patients Amidst Label Noises
+# REAL: Robust EEG Analysis and Labeling for Chronic Migraine Patients Amidst Label Noises
 
 ## 0) 建環境（建議 Conda，含 GPU）
 
