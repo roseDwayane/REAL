@@ -162,6 +162,13 @@ class EEGLabLOSOFeature(object):
 
         self.group = 0
 
+    def n_epochs_to_sn_group(self, n_epochs, coef):
+        n_epochs = int(n_epochs)
+        epochs_sel = np.arange(n_epochs)
+        epochs_sel = epochs_sel.reshape(-1, 1)
+        epochs_sel = np.repeat(epochs_sel, self.channel_factor, axis=1)
+        return epochs_sel
+
     def register_logging(self):
         logging.basicConfig(filename=self.bone_file_name + '.log', level=logging.INFO,
                             format='%(asctime)s %(message)s')
@@ -224,9 +231,14 @@ class EEGLabLOSOFeature(object):
             row = df_dataset_info.iloc[idx]  # 读一行
             file_path = row['file'].strip()
             label = row['label']
-            n_times = row['n_times']
+            n_times = int(row['n_times'])
 
-            sn_sel = self.n_times_to_epochs_sn_group(n_times, over_sampling_coef[label])
+            if file_path.endswith('-epo.fif') or file_path.endswith('-epo.fif.gz'):
+                # 這裡的 n_times 其實是「epoch 數」
+                sn_sel = self.n_epochs_to_sn_group(n_times, over_sampling_coef[label])
+            else:
+                # raw 檔才用時間窗切片
+                sn_sel = self.n_times_to_epochs_sn_group(n_times, over_sampling_coef[label])
 
             # 以fif文件名基础, 生成的epochs独立编排序号
             base_file = os.path.split(file_path)[-1]
@@ -344,46 +356,79 @@ class EEGLabLOSOFeature(object):
 
     def load_feature_data_to_array(self):
         """
-        不分割fif成epochs, 将raw_data整体存入字典.
-        :return:
+        從 features_path 掃出所有 .pkl 檔，透過「規範化後的檔名 key」對應 info.csv，
+        讀到就加入樣本，沒對到就跳過並列出清單。
         """
-        print('>>', 'load_feature_data_to_array()')
+        import re
 
-        df_dataset_info = pd.read_csv(self.info_file)
-        self.dataset_dict = {}
+        def norm_info_key(path: str) -> str:
+            # 由 info.csv 的 'file' 轉 key（去掉 .fif/.fif.gz 與 -epo/_epo）
+            base = os.path.basename(path)
+            base = re.sub(r'\.fif(\.gz)?$', '', base, flags=re.IGNORECASE)
+            base = re.sub(r'[-_]epo$', '', base, flags=re.IGNORECASE)
+            return base
 
-        x_list = []
-        l_list = []
+        def norm_pkl_key(pkl_path: str) -> str:
+            # 由 .pkl 檔名轉 key
+            base = os.path.basename(pkl_path)
+            base = re.sub(r'\.pkl$', '', base, flags=re.IGNORECASE)
+            return base
 
-        # 逐行处理df_dataset_info
-        for idx in df_dataset_info.index:
-            row = df_dataset_info.iloc[idx]  # 读一行
-            file_path = row['file'].strip()
-            label = row['label']
+        print('>> load_feature_data_to_array()')
 
-            base_file = os.path.split(file_path)[-1]
-            features_file_path = os.path.join(features_path, base_file + '.pkl')
-            print(features_file_path)
+        if not os.path.isdir(features_path):
+            raise FileNotFoundError(f"features_path 不存在：{features_path}")
 
-            with open(features_file_path, 'rb') as f:
+        # 1) 建立 features 目錄的索引：key -> pkl 路徑
+        pkl_index = {}
+        for root, _, files in os.walk(features_path):
+            for f in files:
+                if f.lower().endswith('.pkl'):
+                    p = os.path.join(root, f)
+                    pkl_index[norm_pkl_key(p)] = p
+        print(f"[scan] 在 features_path 找到 {len(pkl_index)} 個 .pkl")
+
+        # 2) 讀 info.csv，用 key 對應到 pkl_index
+        df = pd.read_csv(self.info_file)
+        x_list, l_list, miss = [], [], []
+        for _, row in df.iterrows():
+            key = norm_info_key(str(row['file']).strip())
+            pkl_path = pkl_index.get(key)
+            if pkl_path is None:
+                miss.append(key)
+                continue
+
+            with open(pkl_path, 'rb') as f:
                 x_all = pickle.load(f)
 
-                if eeg_config['data_transform']:
-                    # x_all = transformer_like(x_all)
-                    T = eeg_config['T']
-                    x_all = SelfAttention(T=T)(x_all)
+            # 可選轉換/正規化
+            if eeg_config.get('data_transform', False):
+                T = eeg_config.get('T', 1.0)
+                x_all = SelfAttention(T=T)(x_all)
+            if eeg_config.get('data_normalize', False):
+                denom = np.linalg.norm(x_all, axis=1, keepdims=True)
+                denom[denom == 0] = 1.0
+                x_all = x_all / denom
 
-            if eeg_config['data_normalize']:
-                x_all = x_all / np.linalg.norm(x_all, axis=1, keepdims=True)
+            x_list.append(x_all.astype(np.float32))
+            l_list += [int(row['label'])] * x_all.shape[0]
 
-            x_list.append(x_all)
-            l_list += [label] * x_all.shape[0]
+        if not x_list:
+            raise ValueError(
+                "沒有任何 .pkl 與 info.csv 對得上；請檢查 features_path 與檔名。\n"
+                f"- features_path = {features_path}\n"
+                f"- info.csv 檔案數 = {len(df)}\n"
+                f"- 對不到的 key（前 10 個）：{miss[:10]}"
+            )
 
         x_array = np.concatenate(x_list, axis=0)
-        labels = np.array(l_list)
+        labels = np.array(l_list, dtype=np.int64)
 
         self.dataset_array = torch.from_numpy(x_array)
         self.dataset_labels = torch.from_numpy(labels)
+        print(f"[ok] loaded features -> X {self.dataset_array.shape}, y {self.dataset_labels.shape}")
+        if miss:
+            print(f"[warn] 有 {len(miss)} 個檔在 features_path 找不到對應的 .pkl（已略過）。")
 
     ########################################################
 
@@ -806,17 +851,33 @@ class EEGLabLOSOFeature(object):
     def logging_dataset_info(self):
         df_dataset_info = pd.read_csv(self.info_file, index_col=0)
 
+        # 欄名清洗（防 BOM/空白）
+        df_dataset_info.columns = df_dataset_info.columns.str.replace('\ufeff', '', regex=False).str.strip()
+
+        # 必要欄位保底檢查
+        for col in ['label', 'Black_List']:
+            if col not in df_dataset_info.columns:
+                raise ValueError(f"logging_dataset_info(): '{col}' column missing in {self.info_file}. "
+                                f"Rebuild the info file first.")
+
+        # 黑/白名單切分（黑名單可能為空，要能優雅處理）
         df_bl = df_dataset_info[df_dataset_info['Black_List']]
         df_wl = df_dataset_info[~df_dataset_info['Black_List']]
-        df_bl_n = df_bl[df_bl['label'] == 0]
-        df_bl_p = df_bl[df_bl['label'] == 1]
 
-        logging.info('Black List Number: %d/%d' % (len(df_bl_n), len(df_bl_p)))
-        logging.info('Black List Index N: %s' % (json.dumps(df_bl_n.index.to_list()),))
-        logging.info('Black List Index P: %s' % (json.dumps(df_bl_p.index.to_list()),))
+        if len(df_bl) == 0:
+            logging.info('Black List Number: 0/0')
+            logging.info('Black List Index N: []')
+            logging.info('Black List Index P: []')
+        else:
+            df_bl_n = df_bl[df_bl['label'] == 0]
+            df_bl_p = df_bl[df_bl['label'] == 1]
+            logging.info('Black List Number: %d/%d' % (len(df_bl_n), len(df_bl_p)))
+            logging.info('Black List Index N: %s' % (json.dumps(df_bl_n.index.to_list()),))
+            logging.info('Black List Index P: %s' % (json.dumps(df_bl_p.index.to_list()),))
 
         logging.info('White List Number: %d' % (len(df_wl),))
         logging.info('White List Index: %s' % (json.dumps(df_wl.index.to_list()),))
+
 
     def collect_dataset_info(self):
         """
@@ -881,33 +942,63 @@ class EEGLabLOSOFeature(object):
                 for file in files:
                     file_path = os.path.join(root, file)
 
-                    raw = io.Raw(file_path, preload=False, verbose=False)
-                    if len(raw.info['ch_names']) < self.eeg_channel_num:
-                        continue
-
-                    # EC | EO
+                    # EC | EO 篩檔名
                     if not file.startswith(keyword):
                         continue
 
-                    # file_path = file_path.ljust(75)     # 补空格, 目的在于csv文件的可读性.
+                    try:
+                        if file.endswith('-epo.fif') or file.endswith('-epo.fif.gz'):
+                            # epochs 檔
+                            epochs = mne.read_epochs(file_path, preload=False, verbose=False)
+                            if len(epochs.info['ch_names']) < self.eeg_channel_num:
+                                continue
+                            n_unit = len(epochs)              # 用「epoch 數」作為後續單位
+                        else:
+                            # raw 檔
+                            raw = mne.io.read_raw_fif(file_path, preload=False, verbose=False)
+                            if len(raw.info['ch_names']) < self.eeg_channel_num:
+                                continue
+                            n_unit = raw.n_times              # raw 用時間點數
+
+                    except Exception as e:
+                        print(f"[skip] {file_path} -> {e}")
+                        continue
+
                     files_list.append(file_path)
                     print(file_path)
-
-                    df_dict['n_times'].append(raw.n_times)
+                    df_dict['n_times'].append(int(n_unit))     # 對 epochs 其實是 n_epochs
 
             df_dict['file'] += files_list
             df_dict['class_name'] += [class_name] * len(files_list)
             df_dict['label'] += [class_labels[class_name]] * len(files_list)
 
-        df_dataset_info = pd.DataFrame(df_dict, index=[n for n in range(len(df_dict['file']))])
 
+        # 組好 DataFrame 後，先做健檢
+        df_dataset_info = pd.DataFrame(df_dict)
+
+        # 強制標準欄位存在
+        required = ['file', 'class_name', 'label', 'n_times']
+        missing = [c for c in required if c not in df_dataset_info.columns]
+        if missing:
+            raise ValueError(f"collect_dataset_info_with_black_list(): missing columns {missing}. "
+                            f"Check class_labels/class_names and the file walking logic.")
+
+        # 類別轉型，避免後續比較時出問題
+        df_dataset_info['label'] = df_dataset_info['label'].astype(int)
+
+        # 先全部標 False；之後你的 vote_and_save() 會再改 True
         df_dataset_info['Black_List'] = False
-        # for index in df_dataset_info.index:
-        #     if index in bl:
-        #         df_dataset_info.loc[index, 'Black_List'] = True
 
+        # 寫檔
+        df_dataset_info.to_csv(self.info_file, index=True)
 
-        df_dataset_info.to_csv(self.info_file)
+        # 立刻讀回來一次並清洗欄名（去掉 BOM 和首尾空白），再寫回，避免隱形欄名
+        tmp = pd.read_csv(self.info_file, index_col=0)
+        tmp.columns = tmp.columns.str.replace('\ufeff', '', regex=False).str.strip()
+        tmp.to_csv(self.info_file, index=True)
+
+        print('info_file written:', self.info_file)
+        print('info_file columns:', list(tmp.columns))
 
         self.logging_dataset_info()
 
@@ -1652,8 +1743,7 @@ eeg_config = {'duration': 1.5,
 keyword = 'EC'
 
 black_list_file = ''
-features_path = '../../SimSiam(Imb2)/Features/EEGLab_SimSiam_F512_CP_V_IMB2_TC16V3_1.5_1.0/'
-
+features_path = '../../SimSiam/Features/EEGLab_SimSiam_new_1.5_1.0/'
 
 if __name__ == '__main__':
     # 1. Input Data
