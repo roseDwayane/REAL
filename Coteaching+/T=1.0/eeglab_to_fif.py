@@ -114,7 +114,7 @@ def convert_epochs_split(set_path: Path, out_dir: Path, montage: Optional[str], 
     回傳成功數量
     """
     try:
-        epochs = mne.io.read_epochs_eeglab(str(set_path), verbose="warning", montage=None, event_id=None)
+        epochs = mne.io.read_epochs_eeglab(str(set_path), verbose="warning")
     except Exception as e:
         print(f"[error] read_epochs_eeglab failed: {e}")
         return 0
