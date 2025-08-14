@@ -225,3 +225,11 @@ def main(argv: Sequence[str]) -> int:
 
 if __name__ == "__main__":
     sys.exit(main(sys.argv[1:]))
+
+
+"""
+# 轉 CTL 類別
+python eeglab_to_fif.py "../../dataset/set/L" -o "../../dataset/fif/CTL" -r --montage auto --ref avg --overwrite
+# 轉 CM 類別
+python eeglab_to_fif.py "../../dataset/set/R"  -o "../../dataset/fif/CM"  -r --montage auto --ref avg --overwrite
+"""

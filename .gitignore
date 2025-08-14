@@ -209,4 +209,7 @@ __marimo__/
 # EEGLAB/BCI 原始資料
 *.set
 *.fdt
+*.spl
 *.fif
+*.pt
+*.csv
