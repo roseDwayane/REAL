@@ -24,20 +24,21 @@ import torch.nn.functional as F
 # Config (edit these to your paths)
 # -----------------------------
 
-base_path = "./demo_data"  # CSV root; same layout as SimSiam script
+#base_path = "./demo_data"  # CSV root; same layout as SimSiam script
+base_path = 'C:/Users/user/pythonproject/REAL/dataset/MI_data'
 class_names = ['CTL', 'CM']
 class_paths = {'CTL': 'CTL', 'CM': 'CM'}
 class_labels = {'CTL': 0, 'CM': 1}
 
 # Must match the SimSiam feature dimension you produced earlier
 feature_dim = 128     # from eeg_csv_simsiam.py (eeg_config['dim'])
-features_path = "./Features/csvsimsiam_1.5_1.0"  # folder containing <CSV>.pkl
+features_path = "../../SimSiam/Features/csvsimsiam_1.5_1.0"  # folder containing <CSV>.pkl
 
 # Training hyper-params
 cfg = dict(
     duration=1.5,        # seconds (sampling rate assumed 250 Hz)
     stride=1.0,
-    epochs=5,            # set larger for real runs
+    epochs=50,            # set larger for real runs
     batch_size=256,
     lr=5e-3,
     weight_decay=1e-4,
