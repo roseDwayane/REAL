@@ -33,7 +33,8 @@ import torch.nn.functional as F
 # Config (edit to your paths)
 # -----------------------------
 
-base_path = "./demo_data"   # <- change this to your dataset root
+#base_path = "./demo_data"   # <- change this to your dataset root
+base_path = 'C:/Users/user/pythonproject/REAL/dataset/MI_data'
 class_names = ['CTL', 'CM']
 class_paths = {'CTL': 'CTL', 'CM': 'CM'}
 class_labels = {'CTL': 0, 'CM': 1}
@@ -46,7 +47,7 @@ eeg_config = {
     'data_normalize': False,
     'lr_init': 0.2,      # initial LR
     'weight_decay': 1.0e-4,
-    'epochs': 2,         # set larger for real training
+    'epochs': 200,         # set larger for real training
     'batch_size': 16,
     'accum_iter': 2,
     'dim': 128,          # encoder feature dim
@@ -81,7 +82,7 @@ def trial_stem(file_name):
         return m.group(1)
     return file_name[: max(2, min(30, len(file_name)))]
 
-CSV_FILE_RE = re.compile(r'^L_\d+_\d+_\d+\.csv$', re.IGNORECASE)
+CSV_FILE_RE = re.compile(r'^[LR]_\d+_\d+_\d+\.csv$', re.IGNORECASE)
 
 def read_csv_trial(file_path: str) -> np.ndarray:
     """
