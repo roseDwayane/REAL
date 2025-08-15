@@ -133,8 +133,9 @@ class EEGLabLOSOFeature(object):
         code_file = os.path.split(__file__)[-1]  # 获取代码文件名 *.py
         code_file_name, ext = os.path.splitext(code_file)  #
         class_all = '-'.join(class_names)
-        self.bone_file_name = '_'.join([code_file_name, class_all]) + '_' + keyword
-
+        kw_tag = keyword if isinstance(keyword, str) else '+'.join(keyword)
+        self.bone_file_name = '_'.join([code_file_name, class_all]) + '_' + kw_tag
+        
         # info文件名
         self.info_file = self.bone_file_name + '_info.csv'
         self.epochs_file = self.bone_file_name + '_epochs.csv'
@@ -360,19 +361,45 @@ class EEGLabLOSOFeature(object):
         讀到就加入樣本，沒對到就跳過並列出清單。
         """
         import re
+        from pathlib import Path
+
+
+        def norm_key_strip(name_or_path: str) -> str:
+            """
+            把路徑/檔名正規化成可比對的 key：
+            - 兼容 / 與 \（用 Path 取檔名）
+            - 去掉副檔名 .fif/.fif.gz/.pkl
+            - 去掉尾端 -epo/_epo/-raw 及可能跟著的其他段
+            - 去掉 `_pre_trial###` 或 `-trial###` 這類 trial 編號
+            - 統一大小寫與 -/_ 連字
+            """
+            base = Path(str(name_or_path)).name  # 處理 / 與 \ 混用
+            # 去副檔名
+            base = re.sub(r'\.fif(\.gz)?$', '', base, flags=re.I)
+            base = re.sub(r'\.pkl$', '', base, flags=re.I)
+
+            # 去尾碼（epo/raw + 任何後續片段）
+            base = re.sub(r'[-_](epo|raw)(?:[-_].*)?$', '', base, flags=re.I)
+
+            # 去 trial 後綴：_pre_trial001、-trial002、_trial2... 都砍掉
+            base = re.sub(r'([-_]pre)?[-_]?trial\d+$', '', base, flags=re.I)
+
+            # 也有人會把 trial 放在中間：..._pre_trial001_clean 這種
+            base = re.sub(r'([-_]pre)?[-_]?trial\d+([-_].*)?$', '', base, flags=re.I)
+
+            # 視需要移除類別前綴（若 .pkl 有 CTL_/CM_ 而 info 沒有）
+            # base = re.sub(r'^(ctl|cm)[-_]+', '', base, flags=re.I)
+
+            base = base.strip()
+            base = re.sub(r'\s+', '', base)
+            base = re.sub(r'[-_]+', '_', base)  # 把 -/_ 視為相同分隔
+            return base.lower()
 
         def norm_info_key(path: str) -> str:
-            # 由 info.csv 的 'file' 轉 key（去掉 .fif/.fif.gz 與 -epo/_epo）
-            base = os.path.basename(path)
-            base = re.sub(r'\.fif(\.gz)?$', '', base, flags=re.IGNORECASE)
-            base = re.sub(r'[-_]epo$', '', base, flags=re.IGNORECASE)
-            return base
+            return norm_key_strip(path)
 
         def norm_pkl_key(pkl_path: str) -> str:
-            # 由 .pkl 檔名轉 key
-            base = os.path.basename(pkl_path)
-            base = re.sub(r'\.pkl$', '', base, flags=re.IGNORECASE)
-            return base
+            return norm_key_strip(pkl_path)
 
         print('>> load_feature_data_to_array()')
 
@@ -901,7 +928,7 @@ class EEGLabLOSOFeature(object):
                         continue
 
                     # EC | EO
-                    if not file.startswith(keyword):
+                    if not file.startswith(tuple(k.upper() for k in keyword)):
                         continue
 
                     # file_path = file_path.ljust(75)     # 补空格, 目的在于csv文件的可读性.
@@ -943,7 +970,7 @@ class EEGLabLOSOFeature(object):
                     file_path = os.path.join(root, file)
 
                     # EC | EO 篩檔名
-                    if not file.startswith(keyword):
+                    if not file.startswith(tuple(k.upper() for k in keyword)):
                         continue
 
                     try:
@@ -1027,7 +1054,7 @@ class EEGLabLOSOFeature(object):
                         continue
 
                     # EC | EO
-                    if not file.startswith(keyword):
+                    if not file.startswith(tuple(k.upper() for k in keyword)):
                         continue
 
                     file_path = file_path.ljust(75)  # 补空格, 目的在于csv文件的可读性.
@@ -1740,10 +1767,12 @@ eeg_config = {'duration': 1.5,
               }
 
 
-keyword = 'EC'
+#keyword = 'DC'
+keyword = ('DC', 'TD') 
 
 black_list_file = ''
-features_path = '../../SimSiam/Features/EEGLab_SimSiam_new_1.5_1.0/'
+#features_path = '../../SimSiam/Features/EEGLab_SimSiam_new_1.5_1.0/'
+features_path = 'C:/Users/user/pythonproject/REAL/SimSiam/Features/EEGLab_SimSiam_new_1.5_1.0'
 
 if __name__ == '__main__':
     # 1. Input Data

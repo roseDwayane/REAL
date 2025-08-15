@@ -41,6 +41,29 @@ from Co_teachingLib.Dataset import DatasetCoTeachingArray
 
 import logging
 
+from mne.io import read_raw_fif
+import mne
+
+def _probe_fif_for_ntimes(file_path: str):
+    """
+    回傳 (n_times_total, sfreq, kind)
+    kind ∈ {"raw","epochs"}。
+    - raw:    n_times_total = raw.n_times
+    - epochs: n_times_total = len(epochs) * len(epochs.times)
+    """
+    fp = file_path.replace('\\', '/')  # 避免命名判斷問題（Windows 路徑反斜線）
+    if fp.endswith(('-raw.fif', '_raw.fif', '_eeg.fif', '_ieeg.fif',
+                    'raw.fif.gz', '_eeg.fif.gz', '_ieeg.fif.gz')):
+        raw = read_raw_fif(fp, preload=False, verbose=False)
+        return raw.n_times, raw.info['sfreq'], 'raw'
+    elif fp.endswith('-epo.fif'):
+        epochs = mne.read_epochs(fp, preload=False, verbose=False)
+        n_times_total = len(epochs) * len(epochs.times)
+        return n_times_total, epochs.info['sfreq'], 'epochs'
+    else:
+        # 需要支援其它類型再自己加 elif（例如 -ave.fif）
+        raise ValueError(f"Unsupported FIF type for: {file_path}")
+
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 print(device)
 
@@ -1694,19 +1717,26 @@ class EEGLabLOSOFeaturePytorch(object):
                 for file in files:
                     file_path = os.path.join(root, file)
 
-                    raw = io.Raw(file_path, preload=False, verbose=False)
-                    if len(raw.info['ch_names']) < self.eeg_channel_num:
-                        continue
-
-                    # EC | EO
+                    # 只保留你關心的前綴（EC / EO）
                     if not file.startswith(keyword):
                         continue
 
-                    # file_path = file_path.ljust(75)     # 补空格, 目的在于csv文件的可读性.
+                    # 先判斷檔案是 raw 或 epochs，並拿到總點數
+                    try:
+                        n_times_total, sfreq, kind = _probe_fif_for_ntimes(file_path)
+                    except ValueError:
+                        # 不是 FIF 或不支援的類型，略過
+                        continue
+
+                    # 輕量讀 info 檢查通道數（raw/epochs 都可）
+                    info = mne.io.read_info(file_path, verbose=False)
+                    if len(info['ch_names']) < self.eeg_channel_num:
+                        continue
+
                     files_list.append(file_path)
                     print(file_path)
 
-                    df_dict['n_times'].append(raw.n_times)
+                    df_dict['n_times'].append(n_times_total)
 
             df_dict['file'] += files_list
             df_dict['class_name'] += [class_name] * len(files_list)
@@ -1723,34 +1753,39 @@ class EEGLabLOSOFeaturePytorch(object):
 
     def collect_dataset_info_with_black_list(self):
         """
-        导入合格验证文件部分信息, 历并随机分割数据集文件,
-        基础数据目录存盘为 *_info.csv.
-        :return:
+        將資料掃描進 *_info.csv。
+        這版可同時處理 raw(-raw.fif) 與 epochs(-epo.fif)。
         """
-
-        # 用于生成DataFrame(字典生成方法)
+        # 用於生成DataFrame(字典生成方法)
         df_dict = {'file': [], 'class_name': [], 'label': [], 'n_times': []}
 
-        # 收集数据集, 存入DataFrame
+        # 收集數據集，存入DataFrame
         for class_name in class_names:
             files_list = []
             for root, _, files in os.walk(os.path.join(base_path, class_paths[class_name])):
                 for file in files:
                     file_path = os.path.join(root, file)
 
-                    raw = io.Raw(file_path, preload=False, verbose=False)
-                    if len(raw.info['ch_names']) < self.eeg_channel_num:
-                        continue
-
-                    # EC | EO
+                    # 只保留你關心的前綴（EC / EO）
                     if not file.startswith(keyword):
                         continue
 
-                    # file_path = file_path.ljust(75)     # 补空格, 目的在于csv文件的可读性.
+                    # 先判斷檔案是 raw 或 epochs，並拿到總點數
+                    try:
+                        n_times_total, sfreq, kind = _probe_fif_for_ntimes(file_path)
+                    except ValueError:
+                        # 不是 FIF 或不支援的類型，略過
+                        continue
+
+                    # 輕量讀 info 檢查通道數（raw/epochs 都可）
+                    info = mne.io.read_info(file_path, verbose=False)
+                    if len(info['ch_names']) < self.eeg_channel_num:
+                        continue
+
                     files_list.append(file_path)
                     print(file_path)
 
-                    df_dict['n_times'].append(raw.n_times)
+                    df_dict['n_times'].append(n_times_total)
 
             df_dict['file'] += files_list
             df_dict['class_name'] += [class_name] * len(files_list)
@@ -1758,8 +1793,7 @@ class EEGLabLOSOFeaturePytorch(object):
 
         df_dataset_info = pd.DataFrame(df_dict, index=[n for n in range(len(df_dict['file']))])
 
-        import json
-
+        # 讀黑名單，標記
         with open(black_list_file, 'r') as f:
             black_list = json.load(f)
 
@@ -1777,6 +1811,7 @@ class EEGLabLOSOFeaturePytorch(object):
         logging.info('Black List Number: %d/%d' % (len(df_bl_n), len(df_bl_p)))
         logging.info('Black List Index N: %s' % (json.dumps(df_bl_n.index.to_list()),))
         logging.info('Black List Index P: %s' % (json.dumps(df_bl_p.index.to_list()),))
+
 
     ########################################################
 

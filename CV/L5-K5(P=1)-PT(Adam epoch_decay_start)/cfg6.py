@@ -1,5 +1,5 @@
 
-base_path = '../../dataset/fif'
+base_path = 'C:\\Users\\user\\pythonproject\\REAL\\ataset\\fif'
 
 features_single_path = '../../dataset/fif/features_single'
 features_double_path = '../../dataset/fif/features_double'
