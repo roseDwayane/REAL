@@ -183,6 +183,7 @@ def main(args):
     for i, fid in enumerate(file_ids):
         file_to_indices.setdefault(fid, []).append(i)
     n_files = len(used_files)
+    print("[Debug] total file:", n_files)
     if n_files < args.folds:
         raise ValueError(f"Not enough files ({n_files}) for {args.folds}-fold CV.")
     y_file = []
@@ -279,3 +280,12 @@ if __name__ == "__main__":
     p.add_argument("--dropout", type=float, default=0.2)
     args = p.parse_args()
     main(args)
+
+
+"""
+python crossval_from_csv_pkl.py
+  --info_csv ./coteach_info.csv
+  --features_dir ../../SimSiam/Features/csvsimsiam_1.5_1.0
+  --out_dir ./cv_out
+  --folds 5 --epochs 50 --batch_size 256 --lr 1e-3
+"""

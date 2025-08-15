@@ -296,3 +296,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+"""
+python tsne_from_csv_pkl.py 
+  --info-csv ../Coteaching+/T=1.0/coteach_info.csv
+  --features-dir ./Features/csvsimsiam_1.5_1.0
+  --outdir ./Fig_t_SNE 
+  --pca-dims 50 --perplexity 30 --max-per-file 200 --seed 42
+"""
+
